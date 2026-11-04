@@ -1,0 +1,20 @@
+# The Airflow API answers 200 even when a component is down: its JSON body carries the
+# status of each one, so the probes read the body instead of the status code.
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+
+  airflow_metadatabase:
+    prober: http
+    timeout: 5s
+    http:
+      fail_if_body_not_matches_regexp:
+        - '"metadatabase":\s*\{[^}]*"status":\s*"healthy"'
+
+  airflow_dag_processor:
+    prober: http
+    timeout: 5s
+    http:
+      fail_if_body_not_matches_regexp:
+        - '"dag_processor":\s*\{[^}]*"status":\s*"healthy"'
