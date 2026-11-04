@@ -1,0 +1,21 @@
+# Topic definitions, used by scripts/create_topics.sh.
+# Replication factor is 1 because the local stack runs a single broker.
+
+defaults:
+  replication_factor: 1
+  retention_ms: 86400000 # 24 hours
+
+topics:
+  - name: ecommerce-events
+    partitions: 3
+    description: Raw events from the generator
+  - name: valid-events
+    partitions: 3
+    description: Events accepted by the Silver validation
+  - name: invalid-events
+    partitions: 1
+    retention_ms: 604800000 # 7 days, to leave time for investigation
+    description: Rejected events with their rejection reasons
+  - name: transaction-events
+    partitions: 3
+    description: Valid purchase and payment events

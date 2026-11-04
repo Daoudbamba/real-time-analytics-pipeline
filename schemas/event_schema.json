@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/daouda-bamba/real-time-analytics-pipeline/schemas/event_schema.json",
+  "title": "EcommerceEvent",
+  "description": "Contract of the events published on the ecommerce-events topic.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "user_id",
+    "product_id",
+    "category",
+    "amount",
+    "quantity",
+    "event_type",
+    "timestamp",
+    "payment_method",
+    "country"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "user_id": { "type": "string", "pattern": "^U[0-9]{6}$" },
+    "product_id": { "type": "string", "pattern": "^P[0-9]{5}$" },
+    "category": {
+      "type": "string",
+      "enum": ["electronics", "fashion", "home", "beauty", "sports", "books", "groceries", "toys"]
+    },
+    "amount": { "type": "number", "minimum": 0 },
+    "quantity": { "type": "integer", "minimum": 1 },
+    "event_type": {
+      "type": "string",
+      "enum": ["page_view", "add_to_cart", "remove_from_cart", "checkout", "purchase", "payment"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "payment_method": {
+      "type": ["string", "null"],
+      "enum": ["card", "paypal", "bank_transfer", "mobile_money", "cash_on_delivery", null]
+    },
+    "country": { "type": "string", "pattern": "^[A-Z]{2}$" }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "event_type": { "enum": ["purchase", "payment"] } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": {
+          "payment_method": { "type": "string" },
+          "amount": { "type": "number", "exclusiveMinimum": 0 }
+        }
+      }
+    }
+  ]
+}
