@@ -1,0 +1,104 @@
+# Alerts are shown in Prometheus and on the Grafana dashboard; no Alertmanager sends them
+# anywhere. Thresholds suit the local generator, which injects 5 % invalid events.
+groups:
+  - name: services
+    rules:
+      - alert: ServiceDown
+        expr: up{job!~"producer|airflow"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} does not answer Prometheus."
+
+      # The producer only runs with the `producer` Compose profile.
+      - alert: ProducerDown
+        expr: up{job="producer"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The event producer is not running: no new events reach Kafka."
+
+      - alert: AirflowComponentUnhealthy
+        expr: probe_success{job="airflow"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Airflow {{ $labels.component }} is not healthy."
+
+  - name: spark
+    rules:
+      # Containers stay healthy when the master forgets its worker: only this metric shows it.
+      - alert: SparkNoAliveWorker
+        expr: metrics_master_aliveWorkers_Value < 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The Spark master has no alive worker: every job is waiting."
+
+      - alert: SparkApplicationsWaiting
+        expr: metrics_master_waitingApps_Value > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} Spark application(s) have waited for cores for 5 minutes."
+
+  - name: streaming
+    rules:
+      # The streaming application runs five queries: Bronze, Silver, quarantine and two Gold.
+      - alert: StreamingQueryMissing
+        expr: rtap_streaming_active_queries < 5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Only {{ $value }} of the 5 streaming queries are running."
+
+      - alert: StreamingQueryFailed
+        expr: increase(rtap_streaming_query_failures_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Streaming query {{ $labels.query }} stopped with an error."
+
+      - alert: StreamingStalled
+        expr: |
+          (sum(rate(rtap_streaming_input_rows_total{query="bronze_events"}[5m])) or vector(0)) == 0
+          and on() sum(rate(rtap_producer_events_delivered_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka receives events but Bronze has read none for 5 minutes."
+
+      - alert: HighPipelineLatency
+        expr: rtap_pipeline_latency_seconds{quantile="0.95"} > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95 % of events take more than {{ $value | humanizeDuration }} from Kafka to Silver."
+
+  - name: data
+    rules:
+      - alert: ProducerDeliveryFailures
+        expr: sum(increase(rtap_producer_delivery_failures_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanize }} events could not be delivered to Kafka in 5 minutes."
+
+      - alert: HighRejectionRatio
+        expr: |
+          sum(rate(rtap_pipeline_events_quarantined_total[10m]))
+          / (sum(rate(rtap_pipeline_events_valid_total[10m])) + sum(rate(rtap_pipeline_events_quarantined_total[10m])))
+          > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of events are rejected, twice the expected ratio."
