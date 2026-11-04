@@ -1,0 +1,5 @@
+# Full runtime and development environment. Docker images install only what
+# they need from the requirements/ folder.
+-r requirements/producer.txt
+-r requirements/spark.txt
+-r requirements/dev.txt

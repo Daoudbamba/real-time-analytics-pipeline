@@ -1,0 +1,5 @@
+-r base.txt
+# delta-spark 4.4.1 requires pyspark>=4.0.1,<=4.2.0: keep both pins aligned
+# with the SPARK_VERSION and DELTA_VERSION build arguments of the Dockerfiles.
+pyspark==4.1.4
+delta-spark==4.4.1

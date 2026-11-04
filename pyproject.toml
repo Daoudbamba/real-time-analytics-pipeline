@@ -1,0 +1,33 @@
+[project]
+name = "real-time-analytics-pipeline"
+version = "0.1.0"
+description = "Real-time e-commerce analytics with Kafka, Spark, Delta Lake and Airflow"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Daouda Bamba" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+    "spark: needs a local Spark session (run inside the Spark image)",
+    "integration: needs the running Docker stack",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N"]
+# `functions as F` is the standard PySpark idiom.
+ignore = ["N812"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rtap", "producers", "jobs"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+disallow_untyped_defs = true
+warn_unused_ignores = true
