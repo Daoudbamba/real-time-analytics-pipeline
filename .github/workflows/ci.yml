@@ -1,0 +1,82 @@
+# Checks every push and pull request with the same scripts as a local run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, types and unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/*.txt
+      - name: Install the development dependencies
+        run: pip install -r requirements/dev.txt
+      - name: Ruff
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: mypy (host part)
+        run: python -m mypy src producers
+      - name: Unit tests with coverage
+        run: bash scripts/run_tests.sh unit
+      - name: Shell scripts
+        run: shellcheck -x scripts/*.sh
+
+  configuration:
+    name: Compose and monitoring configuration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate a throwaway .env
+        run: bash scripts/init_env.sh
+      - name: docker compose config
+        run: docker compose --profile producer config --quiet
+      - name: Prometheus configuration and alert rules
+        run: >
+          docker run --rm --entrypoint promtool
+          -v "$PWD/monitoring/prometheus:/etc/prometheus:ro"
+          prom/prometheus:v3.13.5 check config /etc/prometheus/prometheus.yml
+      - name: Blackbox configuration
+        run: >
+          docker run --rm -v "$PWD/monitoring/blackbox:/etc/blackbox:ro"
+          prom/blackbox-exporter:v0.29.1 --config.file=/etc/blackbox/blackbox.yml --config.check
+
+  spark:
+    name: Spark tests and types
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/*.txt
+      - name: Install the development dependencies
+        run: pip install -r requirements/dev.txt
+      - name: Spark and Delta tests in the Spark image
+        run: bash scripts/run_tests.sh spark
+      - name: mypy (host and Spark image)
+        run: bash scripts/run_tests.sh typecheck
+
+  airflow:
+    name: Airflow DAG tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: DAG tests in the Airflow image
+        run: bash scripts/run_tests.sh dags
