@@ -1,0 +1,411 @@
+name: rtap
+
+x-spark-image: &spark-image
+  image: rtap-spark:local
+
+x-storage-env: &storage-env
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+  S3_BUCKET: ${S3_BUCKET:-}
+  S3_PREFIX: ${S3_PREFIX:-lakehouse}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  GCS_BUCKET: ${GCS_BUCKET:-}
+  GCS_PREFIX: ${GCS_PREFIX:-lakehouse}
+  GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+
+x-airflow-common: &airflow-common
+  image: rtap-airflow:local
+  # Same UID as the Spark image: drivers and executors write to the same volume.
+  user: "${AIRFLOW_UID:-1000}:0"
+  environment: &airflow-env
+    <<: *storage-env
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__PARALLELISM: "4"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Set AIRFLOW_FERNET_KEY in .env}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # Local stack: every visitor is an admin, so the port only listens on localhost.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?Set AIRFLOW_JWT_SECRET in .env}
+    AIRFLOW__API__WORKERS: "1"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-airflow}
+    AIRFLOW_CONN_SPARK_CLUSTER: '{"conn_type": "spark", "host": "spark://spark-master", "port": 7077}'
+    PYSPARK_PYTHON: python3
+    PYSPARK_DRIVER_PYTHON: /home/airflow/.local/bin/python
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - ./airflow/plugins:/opt/airflow/plugins:ro
+    - airflow-logs:/opt/airflow/logs
+    - lakehouse:/lakehouse
+
+services:
+  kafka:
+    image: apache/kafka:4.3.2
+    container_name: rtap-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_HOST_PORT:-9094}
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+    ports:
+      - 127.0.0.1:${KAFKA_HOST_PORT:-9094}:9094
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # A plain port check: the Kafka CLI tools start a full JVM at each run.
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    restart: on-failure:3
+
+  kafka-init:
+    image: rtap-producer:local
+    build:
+      context: .
+      dockerfile: docker/producer/Dockerfile
+    container_name: rtap-kafka-init
+    command: ["python", "-m", "producers.create_topics"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+
+  producer:
+    image: rtap-producer:local
+    container_name: rtap-producer
+    profiles: ["producer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PRODUCER_EVENTS_PER_SECOND: ${PRODUCER_EVENTS_PER_SECOND:-50}
+      PRODUCER_INVALID_RATIO: ${PRODUCER_INVALID_RATIO:-0.05}
+      PRODUCER_DUPLICATE_RATIO: ${PRODUCER_DUPLICATE_RATIO:-0.02}
+      PRODUCER_LATE_RATIO: ${PRODUCER_LATE_RATIO:-0.03}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    restart: on-failure:3
+
+  spark-master:
+    <<: *spark-image
+    container_name: rtap-spark-master
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+      args:
+        INSTALL_CLOUD_CONNECTORS: ${INSTALL_CLOUD_CONNECTORS:-false}
+    hostname: spark-master
+    command: ["spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master"]
+    ports:
+      - 127.0.0.1:8081:8080
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      SPARK_DAEMON_MEMORY: 256m
+    restart: on-failure:3
+
+  spark-worker:
+    <<: *spark-image
+    container_name: rtap-spark-worker
+    hostname: spark-worker
+    command: ["spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--cores", "4", "--memory", "2g"]
+    environment:
+      <<: *storage-env
+      SPARK_WORKER_DIR: /tmp/spark-work
+      SPARK_DAEMON_MEMORY: 256m
+    volumes:
+      - lakehouse:/lakehouse
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://localhost:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          # 2 GB of executor heap (streaming 1 GB, one Airflow job 768 MB) plus their
+          # off-heap memory: RocksDB, network buffers and Python workers. 2500m was OOM-killed.
+          memory: 3g
+    restart: on-failure:3
+
+  streaming:
+    <<: *spark-image
+    container_name: rtap-streaming
+    hostname: streaming
+    # Python stays the main process, to receive SIGTERM and stop the queries cleanly.
+    command: ["python", "-m", "jobs.streaming_pipeline"]
+    environment:
+      <<: *storage-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STREAMING_TRIGGER_INTERVAL: ${STREAMING_TRIGGER_INTERVAL:-30 seconds}
+      # Two cores stay free for the Airflow jobs.
+      PYSPARK_SUBMIT_ARGS: --master spark://spark-master:7077 --driver-memory 768m --executor-memory 1g --conf spark.cores.max=2 pyspark-shell
+    ports:
+      - 127.0.0.1:4040:4040
+    volumes:
+      - lakehouse:/lakehouse
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      spark-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://localhost:8001/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    stop_grace_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+    restart: on-failure:3
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: rtap-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    restart: on-failure:3
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: rtap-airflow-init
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+      args:
+        INSTALL_CLOUD_CONNECTORS: ${INSTALL_CLOUD_CONNECTORS:-false}
+    # Root is only needed to give the shared volumes to the runtime user.
+    user: "0:0"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        chown -R ${AIRFLOW_UID:-1000}:0 /opt/airflow/logs /lakehouse
+        /home/airflow/.local/bin/python -m airflow db migrate
+        /home/airflow/.local/bin/python -m airflow pools set spark_jobs 1 "Spark jobs run one at a time"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: rtap-airflow-apiserver
+    hostname: airflow-apiserver
+    command: ["api-server"]
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    restart: on-failure:3
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: rtap-airflow-scheduler
+    hostname: airflow-scheduler
+    command: ["scheduler"]
+    depends_on:
+      airflow-apiserver:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 2500m
+    restart: on-failure:3
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: rtap-airflow-dag-processor
+    hostname: airflow-dag-processor
+    command: ["dag-processor"]
+    depends_on:
+      airflow-apiserver:
+        condition: service_healthy
+    healthcheck:
+      # Reads the heartbeat through the API: the Airflow CLI is too heavy for a probe.
+      test: ["CMD-SHELL", "curl --silent http://airflow-apiserver:8080/api/v2/monitor/health | grep --quiet dag_processor"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    restart: on-failure:3
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.11.0
+    container_name: rtap-kafka-exporter
+    command: ["--kafka.server=kafka:9092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:9308/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    restart: on-failure:3
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.29.1
+    container_name: rtap-blackbox-exporter
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./monitoring/blackbox:/etc/blackbox:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:9115/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    restart: on-failure:3
+
+  prometheus:
+    image: prom/prometheus:v3.13.5
+    container_name: rtap-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Bounded so the history never fills a laptop disk.
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+    ports:
+      - 127.0.0.1:9090:9090
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+    restart: on-failure:3
+
+  grafana:
+    image: grafana/grafana:13.2.5
+    container_name: rtap-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/pipeline-overview.json
+    ports:
+      - 127.0.0.1:${GRAFANA_HOST_PORT:-3000}:3000
+    volumes:
+      - ./dashboards/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # About 4 minutes on a busy laptop.
+      start_period: 240s
+    deploy:
+      resources:
+        limits:
+          # Grafana 13 needs about 200 MB at start-up: below 512 MB it spends its CPU in garbage collection.
+          memory: 512m
+    restart: on-failure:3
+
+volumes:
+  kafka-data:
+  lakehouse:
+  postgres-data:
+  airflow-logs:
+  prometheus-data:
+  grafana-data:
