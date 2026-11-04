@@ -1,0 +1,62 @@
+# Central application configuration, loaded by rtap.config.
+# ${VAR:-default} reads an environment variable and falls back to the default.
+# Secrets are never stored here: cloud credentials stay in the environment.
+
+app:
+  name: real-time-analytics-pipeline
+  environment: ${APP_ENV:-local}
+  log_level: ${LOG_LEVEL:-INFO}
+
+kafka:
+  bootstrap_servers: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+  topics:
+    raw: ecommerce-events
+    valid: valid-events
+    invalid: invalid-events
+    transactions: transaction-events
+  producer:
+    acks: all
+    enable_idempotence: true
+    linger_ms: 50
+    batch_size_bytes: 65536
+    compression_type: lz4
+    delivery_timeout_ms: 120000
+    retry_backoff_ms: 200
+  consumer:
+    starting_offsets: earliest
+    max_offsets_per_trigger: 20000
+    # A broker with replication factor 1 can lose offsets: keep the stream alive
+    # and rely on the rejected-event metrics instead of stopping the pipeline.
+    fail_on_data_loss: false
+
+producer:
+  events_per_second: ${PRODUCER_EVENTS_PER_SECOND:-50}
+  invalid_ratio: ${PRODUCER_INVALID_RATIO:-0.05}
+  duplicate_ratio: ${PRODUCER_DUPLICATE_RATIO:-0.02}
+  late_ratio: ${PRODUCER_LATE_RATIO:-0.03}
+  max_lateness_seconds: 180
+  metrics_port: 8000
+
+storage:
+  backend: ${STORAGE_BACKEND:-local}
+  local_root: ${LAKEHOUSE_ROOT:-/lakehouse}
+  s3:
+    bucket: ${S3_BUCKET:-}
+    prefix: ${S3_PREFIX:-lakehouse}
+  gcs:
+    bucket: ${GCS_BUCKET:-}
+    prefix: ${GCS_PREFIX:-lakehouse}
+
+streaming:
+  trigger_interval: ${STREAMING_TRIGGER_INTERVAL:-30 seconds}
+  deduplication_watermark: 10 minutes
+  aggregation_watermark: 2 minutes
+  aggregation_window: 1 minute
+  metrics_port: 8001
+
+quality:
+  max_invalid_ratio: 0.20
+  max_gold_staleness_minutes: 15
+
+maintenance:
+  vacuum_retention_hours: 168
