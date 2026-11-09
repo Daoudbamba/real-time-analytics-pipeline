@@ -52,7 +52,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -192,7 +192,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -308,15 +308,15 @@
     {
       "type": "timeseries",
       "title": "Ingestion rate",
-      "description": "Events per second, from the producer to each streaming query.",
+      "description": "Events per second sent by the producer, read by Bronze and validated by Silver, averaged over 5 minutes.",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rtap_producer_events_delivered_total[$__rate_interval]))",
-          "legendFormat": "delivered to Kafka",
+          "expr": "sum(rate(rtap_producer_events_delivered_total[5m]))",
+          "legendFormat": "sent to Kafka",
           "refId": "A"
         },
         {
@@ -324,9 +324,18 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (query) (rate(rtap_streaming_input_rows_total[$__rate_interval]))",
-          "legendFormat": "{{query}}",
+          "expr": "sum(rate(rtap_streaming_input_rows_total{query=\"bronze_events\"}[5m]))",
+          "legendFormat": "read by Bronze",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(rtap_pipeline_events_valid_total[5m]))",
+          "legendFormat": "validated by Silver",
+          "refId": "C"
         }
       ],
       "fieldConfig": {
@@ -335,7 +344,7 @@
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
-            "fillOpacity": 20,
+            "fillOpacity": 0,
             "showPoints": "never",
             "spanNulls": false,
             "stacking": {
@@ -375,14 +384,14 @@
     {
       "type": "timeseries",
       "title": "Revenue per minute",
-      "description": "",
+      "description": "Average over the last 5 minutes.",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rtap_pipeline_revenue_euros_total[$__rate_interval])) * 60",
+          "expr": "sum(rate(rtap_pipeline_revenue_euros_total[5m])) * 60",
           "legendFormat": "revenue",
           "refId": "A"
         }
@@ -431,49 +440,53 @@
       }
     },
     {
-      "type": "timeseries",
+      "type": "bargauge",
       "title": "Rejections by reason",
-      "description": "An event with several problems counts once per reason.",
+      "description": "The 5 most frequent rejection reasons over the selected period.",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (reason) (rate(rtap_pipeline_events_rejected_total[$__rate_interval]))",
+          "expr": "sort_desc(topk(5, sum by (reason) (increase(rtap_pipeline_events_rejected_total[$__range]))))",
           "legendFormat": "{{reason}}",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 20,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            }
-          },
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
           "color": {
-            "mode": "palette-classic"
+            "mode": "fixed",
+            "fixedColor": "orange"
           }
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "sizing": "manual",
+        "minVizHeight": 16,
+        "maxVizHeight": 36,
+        "text": {
+          "titleSize": 15,
+          "valueSize": 22
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "id": 7,
@@ -491,14 +504,14 @@
     {
       "type": "timeseries",
       "title": "Transactions per minute",
-      "description": "",
+      "description": "Average over the last 5 minutes.",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rtap_pipeline_transactions_total[$__rate_interval])) * 60",
+          "expr": "sum(rate(rtap_pipeline_transactions_total[5m])) * 60",
           "legendFormat": "transactions",
           "refId": "A"
         }
