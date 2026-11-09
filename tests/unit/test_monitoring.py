@@ -9,7 +9,7 @@ import yaml
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 GRAFANA = REPOSITORY / "dashboards" / "grafana"
-DASHBOARD = GRAFANA / "dashboards" / "pipeline-overview.json"
+DASHBOARDS = sorted((GRAFANA / "dashboards").glob("*.json"))
 DATASOURCES = GRAFANA / "provisioning" / "datasources" / "prometheus.yml"
 PROMETHEUS = REPOSITORY / "monitoring" / "prometheus" / "prometheus.yml"
 ALERTS = REPOSITORY / "monitoring" / "prometheus" / "alerts.yml"
@@ -36,9 +36,17 @@ def exposed_metrics() -> set[str]:
     return names
 
 
+def dashboards() -> list[dict[str, Any]]:
+    return [json.loads(path.read_text(encoding="utf-8")) for path in DASHBOARDS]
+
+
 def dashboard_queries() -> list[str]:
-    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
-    return [target["expr"] for panel in dashboard["panels"] for target in panel.get("targets", [])]
+    return [
+        target["expr"]
+        for dashboard in dashboards()
+        for panel in dashboard["panels"]
+        for target in panel.get("targets", [])
+    ]
 
 
 def alert_rules() -> list[dict[str, Any]]:
@@ -61,15 +69,22 @@ def test_dashboard_and_alerts_only_use_exposed_metrics() -> None:
     assert used - exposed_metrics() == set()
 
 
-def test_dashboard_panels_have_unique_ids_and_the_provisioned_datasource() -> None:
-    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
-    datasource_uid = yaml.safe_load(DATASOURCES.read_text())["datasources"][0]["uid"]
-    ids = [panel["id"] for panel in dashboard["panels"]]
+def test_dashboards_have_unique_uids() -> None:
+    uids = [dashboard["uid"] for dashboard in dashboards()]
 
-    assert len(ids) == len(set(ids))
-    for panel in dashboard["panels"]:
-        if panel["type"] != "row":
-            assert panel["datasource"]["uid"] == datasource_uid, panel["title"]
+    assert len(uids) == 2
+    assert len(uids) == len(set(uids))
+
+
+def test_dashboard_panels_have_unique_ids_and_the_provisioned_datasource() -> None:
+    datasource_uid = yaml.safe_load(DATASOURCES.read_text())["datasources"][0]["uid"]
+    for dashboard in dashboards():
+        ids = [panel["id"] for panel in dashboard["panels"]]
+
+        assert len(ids) == len(set(ids)), dashboard["uid"]
+        for panel in dashboard["panels"]:
+            if panel["type"] != "row":
+                assert panel["datasource"]["uid"] == datasource_uid, panel["title"]
 
 
 def test_every_alert_has_a_severity_and_a_summary() -> None:
